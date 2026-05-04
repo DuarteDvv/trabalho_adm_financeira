@@ -23,5 +23,8 @@ pip install -r requirements.txt
 streamlit run main.py
 ```
 
----
+### 4. Coloque seu email
 
+o stramlite vai pedir seu email pode colocar qualquer email que vai, o streamlite vai mostrar no terminal:![alt text](image.png)
+
+apenas entre no link após "Local Url:"
