@@ -99,6 +99,111 @@ def calcular_metricas(retornos, rf_anual):
     }
 
 
+def calcular_vpl(investimento_inicial, fluxos_caixa, taxa_desconto_percentual):
+    """
+    Calcula o Valor Presente Líquido (VPL) de um projeto.
+    O investimento inicial é tratado como saída de caixa no período zero.
+    """
+    taxa = taxa_desconto_percentual / 100
+    vpl = -investimento_inicial
+
+    for periodo, fluxo in enumerate(fluxos_caixa, start=1):
+        vpl += fluxo / ((1 + taxa) ** periodo)
+
+    return vpl
+
+
+def calcular_tir(investimento_inicial, fluxos_caixa, tolerancia=1e-6, max_iteracoes=200):
+    """
+    Calcula a Taxa Interna de Retorno (TIR) pelo método da bisseção.
+    Retorna NaN quando não há troca de sinal suficiente para encontrar raiz.
+    """
+    fluxos_completos = [-investimento_inicial] + list(fluxos_caixa)
+
+    def funcao_vpl(taxa):
+        return sum(fluxo / ((1 + taxa) ** periodo) for periodo, fluxo in enumerate(fluxos_completos))
+
+    taxa_minima = -0.9999
+    taxa_maxima = 10.0
+    valor_minimo = funcao_vpl(taxa_minima)
+    valor_maximo = funcao_vpl(taxa_maxima)
+
+    if np.sign(valor_minimo) == np.sign(valor_maximo):
+        return np.nan
+
+    taxa_media = np.nan
+    for _ in range(max_iteracoes):
+        taxa_media = (taxa_minima + taxa_maxima) / 2
+        valor_medio = funcao_vpl(taxa_media)
+
+        if abs(valor_medio) < tolerancia:
+            return taxa_media
+
+        if np.sign(valor_medio) == np.sign(valor_minimo):
+            taxa_minima = taxa_media
+            valor_minimo = valor_medio
+        else:
+            taxa_maxima = taxa_media
+
+    return taxa_media
+
+
+def calcular_payback_simples(investimento_inicial, fluxos_caixa):
+    """
+    Calcula o payback simples, permitindo retorno fracionado dentro do ano.
+    """
+    saldo_acumulado = -investimento_inicial
+
+    for periodo, fluxo in enumerate(fluxos_caixa, start=1):
+        saldo_anterior = saldo_acumulado
+        saldo_acumulado += fluxo
+
+        if saldo_acumulado >= 0 and fluxo != 0:
+            fracao = abs(saldo_anterior) / fluxo
+            return (periodo - 1) + fracao
+
+    return np.nan
+
+
+def calcular_payback_descontado(investimento_inicial, fluxos_caixa, taxa_desconto_percentual):
+    """
+    Calcula o payback descontado com base na taxa mínima de atratividade.
+    """
+    taxa = taxa_desconto_percentual / 100
+    saldo_acumulado = -investimento_inicial
+
+    for periodo, fluxo in enumerate(fluxos_caixa, start=1):
+        fluxo_descontado = fluxo / ((1 + taxa) ** periodo)
+        saldo_anterior = saldo_acumulado
+        saldo_acumulado += fluxo_descontado
+
+        if saldo_acumulado >= 0 and fluxo_descontado != 0:
+            fracao = abs(saldo_anterior) / fluxo_descontado
+            return (periodo - 1) + fracao
+
+    return np.nan
+
+
+def montar_tabela_projeto(investimento_inicial, fluxos_caixa, taxa_desconto_percentual):
+    """
+    Gera a tabela consolidada de fluxos do projeto com valores nominais,
+    descontados e acumulados para exibição e exportação.
+    """
+    taxa = taxa_desconto_percentual / 100
+    periodos = list(range(0, len(fluxos_caixa) + 1))
+    fluxos = [-investimento_inicial] + list(fluxos_caixa)
+    fluxos_descontados = [fluxo / ((1 + taxa) ** periodo) for periodo, fluxo in enumerate(fluxos)]
+
+    df_projeto = pd.DataFrame({
+        "Período": periodos,
+        "Fluxo de Caixa (R$)": fluxos,
+        "Fluxo Descontado (R$)": fluxos_descontados,
+    })
+    df_projeto["Acumulado (R$)"] = df_projeto["Fluxo de Caixa (R$)"].cumsum()
+    df_projeto["Acumulado Descontado (R$)"] = df_projeto["Fluxo Descontado (R$)"].cumsum()
+    return df_projeto
+
+
 # =================================================================
 # PALETA E CONFIGURAÇÃO DE PÁGINA
 # =================================================================
@@ -359,6 +464,9 @@ PLOTLY_LAYOUT = dict(
 COLORS_SEQ = [PALETTE["accent"], PALETTE["accent2"], PALETTE["accent3"],
               PALETTE["positive"], PALETTE["negative"], "#60A5FA", "#FB923C", "#E879F9"]
 
+tickers_selecionados = []
+fluxos_caixa_projeto = []
+
 # =================================================================
 # SIDEBAR
 # =================================================================
@@ -380,75 +488,113 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("#### 🇧🇷 Ações B3")
-    ACOES_B3 = {
-        "PETR4.SA — Petrobras PN": "PETR4.SA",
-        "VALE3.SA — Vale ON": "VALE3.SA",
-        "ITUB4.SA — Itaú PN": "ITUB4.SA",
-        "WEGE3.SA — WEG ON": "WEGE3.SA",
-        "ABEV3.SA — Ambev ON": "ABEV3.SA",
-        "MGLU3.SA — Magazine Luiza": "MGLU3.SA",
-        "BBDC4.SA — Bradesco PN": "BBDC4.SA",
-        "BBAS3.SA — Banco do Brasil": "BBAS3.SA",
-        "RENT3.SA — Localiza ON": "RENT3.SA",
-        "LREN3.SA — Lojas Renner ON": "LREN3.SA",
-        "GGBR4.SA — Gerdau PN": "GGBR4.SA",
-        "SUZB3.SA — Suzano ON": "SUZB3.SA",
-        "RDOR3.SA — Rede D'Or ON": "RDOR3.SA",
-        "B3SA3.SA — B3 ON": "B3SA3.SA",
-        "CPLE6.SA — Copel": "CPLE6.SA",
-    }
-    sel_acoes = st.multiselect(
-        "Selecione ações:",
-        options=list(ACOES_B3.keys()),
-        default=["PETR4.SA — Petrobras PN", "VALE3.SA — Vale ON", "ITUB4.SA — Itaú PN", "WEGE3.SA — WEG ON"],
-        key="acoes",
+    modulo_escolhido = st.selectbox(
+        "Módulo do trabalho:",
+        ["Trabalho 1 — Risco e Retorno", "Trabalho 2 — Projeto de Investimento"],
     )
 
-    st.markdown("#### 🌎 ETFs & BDRs")
-    ETFS = {
-        "BOVA11.SA — ETF IBOV": "BOVA11.SA",
-        "IVVB11.SA — ETF S&P 500": "IVVB11.SA",
-        "HASH11.SA — ETF Crypto": "HASH11.SA",
-        "GOLD11.SA — ETF Ouro": "GOLD11.SA",
-        "FIXA11.SA — ETF Renda Fixa": "FIXA11.SA",
-        "XINA11.SA — ETF China": "XINA11.SA",
-        "EURP11.SA — ETF Europa": "EURP11.SA",
-    }
-    sel_etfs = st.multiselect("Selecione ETFs/BDRs:", options=list(ETFS.keys()), default=[], key="etfs")
-
-    st.markdown("#### 🌐 Ativos Globais (USD)")
-    GLOBAIS = {
-        "AAPL — Apple": "AAPL",
-        "MSFT — Microsoft": "MSFT",
-        "GOOGL — Alphabet": "GOOGL",
-        "AMZN — Amazon": "AMZN",
-        "NVDA — NVIDIA": "NVDA",
-        "TSLA — Tesla": "TSLA",
-        "META — Meta": "META",
-        "SPY — S&P 500 ETF": "SPY",
-        "QQQ — Nasdaq ETF": "QQQ",
-        "GLD — Gold ETF": "GLD",
-        "BTC-USD — Bitcoin": "BTC-USD",
-        "ETH-USD — Ethereum": "ETH-USD",
-    }
-    sel_globais = st.multiselect("Selecione ativos globais:", options=list(GLOBAIS.keys()), default=[], key="globais")
-
     st.markdown("---")
-    st.markdown("#### ⚙️ Período")
-    col_d1, col_d2 = st.columns(2)
-    with col_d1:
-        data_inicio = st.date_input("Início", datetime.now() - timedelta(days=365 * 3), label_visibility="visible")
-    with col_d2:
-        data_fim = st.date_input("Fim", datetime.now(), label_visibility="visible")
 
-    st.markdown("#### 📐 Parâmetros")
-    taxa_livre_risco = st.number_input("Taxa livre de risco (% a.a.):", min_value=0.0, max_value=25.0, value=10.75, step=0.25)
-    benchmark_label = st.selectbox("Benchmark:", ["Nenhum", "IBOV (^BVSP)", "S&P 500 (^GSPC)", "Nasdaq (^IXIC)"])
-    adicionar_carteira = st.checkbox("Incluir carteira igual peso", value=True)
+    if modulo_escolhido == "Trabalho 1 — Risco e Retorno":
+        st.markdown("#### 🇧🇷 Ações B3")
+        ACOES_B3 = {
+            "PETR4.SA — Petrobras PN": "PETR4.SA",
+            "VALE3.SA — Vale ON": "VALE3.SA",
+            "ITUB4.SA — Itaú PN": "ITUB4.SA",
+            "WEGE3.SA — WEG ON": "WEGE3.SA",
+            "ABEV3.SA — Ambev ON": "ABEV3.SA",
+            "MGLU3.SA — Magazine Luiza": "MGLU3.SA",
+            "BBDC4.SA — Bradesco PN": "BBDC4.SA",
+            "BBAS3.SA — Banco do Brasil": "BBAS3.SA",
+            "RENT3.SA — Localiza ON": "RENT3.SA",
+            "LREN3.SA — Lojas Renner ON": "LREN3.SA",
+            "GGBR4.SA — Gerdau PN": "GGBR4.SA",
+            "SUZB3.SA — Suzano ON": "SUZB3.SA",
+            "RDOR3.SA — Rede D'Or ON": "RDOR3.SA",
+            "B3SA3.SA — B3 ON": "B3SA3.SA",
+            "CPLE6.SA — Copel": "CPLE6.SA",
+        }
+        sel_acoes = st.multiselect(
+            "Selecione ações:",
+            options=list(ACOES_B3.keys()),
+            default=["PETR4.SA — Petrobras PN", "VALE3.SA — Vale ON", "ITUB4.SA — Itaú PN", "WEGE3.SA — WEG ON"],
+            key="acoes",
+        )
+
+        st.markdown("#### 🌎 ETFs & BDRs")
+        ETFS = {
+            "BOVA11.SA — ETF IBOV": "BOVA11.SA",
+            "IVVB11.SA — ETF S&P 500": "IVVB11.SA",
+            "HASH11.SA — ETF Crypto": "HASH11.SA",
+            "GOLD11.SA — ETF Ouro": "GOLD11.SA",
+            "FIXA11.SA — ETF Renda Fixa": "FIXA11.SA",
+            "XINA11.SA — ETF China": "XINA11.SA",
+            "EURP11.SA — ETF Europa": "EURP11.SA",
+        }
+        sel_etfs = st.multiselect("Selecione ETFs/BDRs:", options=list(ETFS.keys()), default=[], key="etfs")
+
+        st.markdown("#### 🌐 Ativos Globais (USD)")
+        GLOBAIS = {
+            "AAPL — Apple": "AAPL",
+            "MSFT — Microsoft": "MSFT",
+            "GOOGL — Alphabet": "GOOGL",
+            "AMZN — Amazon": "AMZN",
+            "NVDA — NVIDIA": "NVDA",
+            "TSLA — Tesla": "TSLA",
+            "META — Meta": "META",
+            "SPY — S&P 500 ETF": "SPY",
+            "QQQ — Nasdaq ETF": "QQQ",
+            "GLD — Gold ETF": "GLD",
+            "BTC-USD — Bitcoin": "BTC-USD",
+            "ETH-USD — Ethereum": "ETH-USD",
+        }
+        sel_globais = st.multiselect("Selecione ativos globais:", options=list(GLOBAIS.keys()), default=[], key="globais")
+
+        st.markdown("---")
+        st.markdown("#### ⚙️ Período")
+        col_d1, col_d2 = st.columns(2)
+        with col_d1:
+            data_inicio = st.date_input("Início", datetime.now() - timedelta(days=365 * 3), label_visibility="visible")
+        with col_d2:
+            data_fim = st.date_input("Fim", datetime.now(), label_visibility="visible")
+
+        st.markdown("#### 📐 Parâmetros")
+        taxa_livre_risco = st.number_input("Taxa livre de risco (% a.a.):", min_value=0.0, max_value=25.0, value=10.75, step=0.25)
+        benchmark_label = st.selectbox("Benchmark:", ["Nenhum", "IBOV (^BVSP)", "S&P 500 (^GSPC)", "Nasdaq (^IXIC)"])
+        adicionar_carteira = st.checkbox("Incluir carteira igual peso", value=True)
+
+        tickers_selecionados = (
+            [ACOES_B3[a] for a in sel_acoes]
+            + [ETFS[e] for e in sel_etfs]
+            + [GLOBAIS[g] for g in sel_globais]
+        )
+
+    else:
+        st.markdown("#### 🧾 Dados do Projeto")
+        nome_projeto = st.text_input("Nome do projeto:", value="Expansão da unidade")
+        investimento_inicial = st.number_input("Investimento inicial (R$):", min_value=0.0, value=80000.0, step=5000.0)
+        taxa_desconto = st.number_input("TMA / taxa de desconto (% a.a.):", min_value=0.0, max_value=100.0, value=12.0, step=0.5)
+        quantidade_periodos = st.slider("Quantidade de períodos anuais:", min_value=3, max_value=10, value=5)
+
+        st.markdown("#### 💰 Fluxos de Caixa")
+        for periodo in range(1, quantidade_periodos + 1):
+            fluxo = st.number_input(
+                f"Fluxo de caixa do ano {periodo} (R$):",
+                value=float(20000 + (periodo - 1) * 4000),
+                step=1000.0,
+                key=f"fluxo_projeto_{periodo}",
+            )
+            fluxos_caixa_projeto.append(fluxo)
 
     st.markdown("---")
     executar = st.button("▶  Gerar Análise", use_container_width=True)
+
+if modulo_escolhido == "Trabalho 1 — Risco e Retorno":
+    subtitulo_modulo = "Análise de Risco e Retorno"
+    rotulo_trabalho = "Trabalho 1 · CAD/UFMG"
+else:
+    subtitulo_modulo = "Análise de Projeto de Investimento"
+    rotulo_trabalho = "Trabalho 2 · CAD/UFMG"
 
 # =================================================================
 # HEADER
@@ -461,7 +607,7 @@ st.markdown(f"""
             -webkit-background-clip:text;-webkit-text-fill-color:transparent;'>
             FinRisk
         </span>
-        <span style='color:{PALETTE["muted"]};font-size:1rem;'>Análise de Risco e Retorno</span>
+        <span style='color:{PALETTE["muted"]};font-size:1rem;'>{subtitulo_modulo}</span>
     </div>
     <div style='display:flex;gap:2rem;margin-top:0.4rem;flex-wrap:wrap;'>
         <span style='font-size:0.75rem;color:{PALETTE["muted"]};'>
@@ -471,7 +617,7 @@ st.markdown(f"""
             <span style='color:{PALETTE["accent3"]};font-weight:600;'>■</span> Administração Financeira · Prof. Bruno Pérez Ferreira
         </span>
         <span style='font-size:0.75rem;color:{PALETTE["muted"]};'>
-            <span style='color:{PALETTE["accent2"]};font-weight:600;'>■</span> Trabalho 1 · CAD/UFMG
+            <span style='color:{PALETTE["accent2"]};font-weight:600;'>■</span> {rotulo_trabalho}
         </span>
     </div>
 </div>
@@ -480,398 +626,565 @@ st.markdown(f"""
 # =================================================================
 # COLETA E PROCESSAMENTO
 # =================================================================
-bench_map = {
-    "IBOV (^BVSP)": "^BVSP",
-    "S&P 500 (^GSPC)": "^GSPC",
-    "Nasdaq (^IXIC)": "^IXIC",
-}
+if modulo_escolhido == "Trabalho 1 — Risco e Retorno":
+    bench_map = {
+        "IBOV (^BVSP)": "^BVSP",
+        "S&P 500 (^GSPC)": "^GSPC",
+        "Nasdaq (^IXIC)": "^IXIC",
+    }
 
-tickers_selecionados = (
-    [ACOES_B3[a] for a in sel_acoes]
-    + [ETFS[e] for e in sel_etfs]
-    + [GLOBAIS[g] for g in sel_globais]
-)
-
-if executar and tickers_selecionados:
-    with st.spinner("Conectando ao Yahoo Finance..."):
-        try:
-            dados_brutos = yf.download(
-                tickers_selecionados,
-                start=data_inicio,
-                end=data_fim,
-                auto_adjust=True,
-                group_by="column",
-                progress=False,
-            )
-            dados = extrair_precos(dados_brutos, tickers=tickers_selecionados)
-
-            if dados.empty:
-                st.error("Nenhum dado retornado. Verifique os ativos e o período.")
-                st.stop()
-
-            dados = dados.dropna(how="all")
-            if dados.shape[0] < 2:
-                st.error("Dados insuficientes no período escolhido.")
-                st.stop()
-
-            retornos_diarios = dados.pct_change().dropna(how="any")
-
-            benchmark_ticker = bench_map.get(benchmark_label)
-            retornos_benchmark = None
-
-            if benchmark_ticker:
-                dados_bm = yf.download(benchmark_ticker, start=data_inicio, end=data_fim, auto_adjust=True, progress=False)
-                precos_bm = extrair_precos(dados_bm, tickers=[benchmark_ticker])
-                if not precos_bm.empty:
-                    rb = precos_bm.iloc[:, 0].pct_change().dropna()
-                    alinhado = retornos_diarios.join(rb.rename("_BM"), how="inner").dropna()
-                    if not alinhado.empty:
-                        retornos_benchmark = alinhado["_BM"]
-                        retornos_diarios = alinhado.drop(columns=["_BM"])
-
-            if adicionar_carteira and retornos_diarios.shape[1] > 1:
-                retornos_diarios["⚖ Carteira Eq. Peso"] = retornos_diarios.mean(axis=1)
-
-            rf_anual = taxa_livre_risco / 100
-            metricas = calcular_metricas(retornos_diarios, rf_anual)
-
-            df_resumo = pd.DataFrame({
-                "Retorno Total (%)": metricas["retorno_total"] * 100,
-                "CAGR (%)": metricas["cagr"] * 100,
-                "Retorno Anual (%)": metricas["retorno_anual"] * 100,
-                "Volatilidade (%)": metricas["risco_anual"] * 100,
-                "Sharpe": metricas["sharpe"],
-                "Sortino": metricas["sortino"],
-                "Calmar": metricas["calmar"],
-                "Max Drawdown (%)": metricas["max_drawdown"] * 100,
-                "VaR 95% (diário %)": metricas["var_95"] * 100,
-                "CVaR 95% (diário %)": metricas["cvar_95"] * 100,
-                "Assimetria": metricas["skew"],
-                "Curtose": metricas["kurt"],
-            })
-
-            if retornos_benchmark is not None and retornos_benchmark.var() != 0:
-                beta = retornos_diarios.apply(
-                    lambda s: s.cov(retornos_benchmark) / retornos_benchmark.var()
+    if executar and tickers_selecionados:
+        with st.spinner("Conectando ao Yahoo Finance..."):
+            try:
+                dados_brutos = yf.download(
+                    tickers_selecionados,
+                    start=data_inicio,
+                    end=data_fim,
+                    auto_adjust=True,
+                    group_by="column",
+                    progress=False,
                 )
-                alpha_jensen = (
-                    metricas["retorno_anual"]
-                    - rf_anual
-                    - beta * (retornos_benchmark.mean() * 252 - rf_anual)
-                )
-                df_resumo["Beta"] = beta
-                df_resumo["Alpha de Jensen (%)"] = alpha_jensen * 100
+                dados = extrair_precos(dados_brutos, tickers=tickers_selecionados)
 
-            melhor_retorno = df_resumo["Retorno Anual (%)"].idxmax()
-            melhor_sharpe = df_resumo["Sharpe"].idxmax()
-            menor_drawdown = df_resumo["Max Drawdown (%)"].idxmax()
-            menor_volatilidade = df_resumo["Volatilidade (%)"].idxmin()
+                if dados.empty:
+                    st.error("Nenhum dado retornado. Verifique os ativos e o período.")
+                    st.stop()
 
-            # ── KPIs ──
-            st.markdown(f"""
-            <div style='background:{PALETTE["panel"]};border:1px solid {PALETTE["border"]};
-                border-radius:14px;padding:1rem 1.5rem;margin-bottom:1.5rem;
-                display:flex;gap:2rem;flex-wrap:wrap;align-items:center;'>
-                <div>
-                    <div style='font-size:0.68rem;color:{PALETTE["muted"]};text-transform:uppercase;letter-spacing:0.1em;'>Período</div>
-                    <div style='font-family:JetBrains Mono,monospace;font-size:0.9rem;color:{PALETTE["text"]};'>
-                        {data_inicio.strftime("%d/%m/%Y")} → {data_fim.strftime("%d/%m/%Y")}
-                    </div>
-                </div>
-                <div>
-                    <div style='font-size:0.68rem;color:{PALETTE["muted"]};text-transform:uppercase;letter-spacing:0.1em;'>Dias úteis</div>
-                    <div style='font-family:JetBrains Mono,monospace;font-size:0.9rem;color:{PALETTE["text"]};'>
-                        {len(retornos_diarios)}
-                    </div>
-                </div>
-                <div>
-                    <div style='font-size:0.68rem;color:{PALETTE["muted"]};text-transform:uppercase;letter-spacing:0.1em;'>Séries</div>
-                    <div style='font-family:JetBrains Mono,monospace;font-size:0.9rem;color:{PALETTE["text"]};'>
-                        {retornos_diarios.shape[1]}
-                    </div>
-                </div>
-                <div>
-                    <div style='font-size:0.68rem;color:{PALETTE["muted"]};text-transform:uppercase;letter-spacing:0.1em;'>Taxa livre de risco</div>
-                    <div style='font-family:JetBrains Mono,monospace;font-size:0.9rem;color:{PALETTE["accent2"]};'>
-                        {taxa_livre_risco:.2f}% a.a.
-                    </div>
-                </div>
-                <div>
-                    <div style='font-size:0.68rem;color:{PALETTE["muted"]};text-transform:uppercase;letter-spacing:0.1em;'>Benchmark</div>
-                    <div style='font-family:JetBrains Mono,monospace;font-size:0.9rem;color:{PALETTE["accent3"]};'>
-                        {benchmark_label}
-                    </div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+                dados = dados.dropna(how="all")
+                if dados.shape[0] < 2:
+                    st.error("Dados insuficientes no período escolhido.")
+                    st.stop()
 
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("🏆 Maior Retorno Anual", melhor_retorno,
-                      f"{df_resumo.loc[melhor_retorno, 'Retorno Anual (%)']:.2f}%")
-            c2.metric("⚡ Maior Sharpe", melhor_sharpe,
-                      f"{df_resumo.loc[melhor_sharpe, 'Sharpe']:.2f}")
-            c3.metric("🛡 Menor Drawdown", menor_drawdown,
-                      f"{df_resumo.loc[menor_drawdown, 'Max Drawdown (%)']:.2f}%")
-            c4.metric("🎯 Menor Volatilidade", menor_volatilidade,
-                      f"{df_resumo.loc[menor_volatilidade, 'Volatilidade (%)']:.2f}%")
+                retornos_diarios = dados.pct_change().dropna(how="any")
 
-            st.markdown("")
+                benchmark_ticker = bench_map.get(benchmark_label)
+                retornos_benchmark = None
 
-            tabs = st.tabs([
-                "📈 Retorno Acumulado",
-                "🎯 Risco × Retorno",
-                "📉 Drawdown",
-                "🔗 Correlação",
-                "📊 Distribuições",
-                "🧮 Estatísticas",
-                "📋 Relatório",
-            ])
+                if benchmark_ticker:
+                    dados_bm = yf.download(benchmark_ticker, start=data_inicio, end=data_fim, auto_adjust=True, progress=False)
+                    precos_bm = extrair_precos(dados_bm, tickers=[benchmark_ticker])
+                    if not precos_bm.empty:
+                        rb = precos_bm.iloc[:, 0].pct_change().dropna()
+                        alinhado = retornos_diarios.join(rb.rename("_BM"), how="inner").dropna()
+                        if not alinhado.empty:
+                            retornos_benchmark = alinhado["_BM"]
+                            retornos_diarios = alinhado.drop(columns=["_BM"])
 
-            # ── TAB 1: Retorno Acumulado ──
-            with tabs[0]:
-                base100 = metricas["acumulado"] * 100
-                fig = go.Figure()
-                for i, col in enumerate(base100.columns):
-                    cor = COLORS_SEQ[i % len(COLORS_SEQ)]
-                    fig.add_trace(go.Scatter(
-                        x=base100.index, y=base100[col],
-                        name=col, line=dict(color=cor, width=2),
-                        hovertemplate="%{x|%d/%m/%Y}<br><b>%{y:.1f}</b><extra>" + col + "</extra>",
-                    ))
-                fig.add_hline(y=100, line_dash="dot", line_color=PALETTE["muted"], opacity=0.5)
-                fig.update_layout(**PLOTLY_LAYOUT, title="Retorno Acumulado (Base 100)", height=430)
-                st.plotly_chart(fig, use_container_width=True)
-                st.caption("Base 100 no início do período. Retornos calculados com preços ajustados.")
+                if adicionar_carteira and retornos_diarios.shape[1] > 1:
+                    retornos_diarios["⚖ Carteira Eq. Peso"] = retornos_diarios.mean(axis=1)
 
-            # ── TAB 2: Risco × Retorno ──
-            with tabs[1]:
-                col_a, col_b = st.columns([2, 1])
-                with col_a:
-                    fig2 = px.scatter(
-                        df_resumo.reset_index().rename(columns={"index": "Ativo"}),
-                        x="Volatilidade (%)", y="Retorno Anual (%)",
-                        text="Ativo", size=df_resumo["Sharpe"].clip(lower=0.01).values,
-                        color="Sharpe", color_continuous_scale=["#F87171", "#F59E0B", "#34D399"],
-                        title="Risco × Retorno (tamanho = Sharpe)",
-                        hover_data=["Sharpe", "Max Drawdown (%)"],
-                    )
-                    fig2.update_traces(textposition="top center", marker=dict(opacity=0.85, line=dict(width=1, color="#000")))
-                    fig2.update_layout(**PLOTLY_LAYOUT, height=430,
-                                       coloraxis_colorbar=dict(title="Sharpe", tickfont=dict(color=PALETTE["muted"])))
-                    st.plotly_chart(fig2, use_container_width=True)
-                with col_b:
-                    st.markdown(f"""
-                    <div style='background:{PALETTE["panel2"]};border:1px solid {PALETTE["border"]};
-                        border-radius:12px;padding:1.2rem;height:430px;overflow-y:auto;'>
-                        <div style='font-size:0.7rem;text-transform:uppercase;letter-spacing:0.1em;
-                            color:{PALETTE["muted"]};margin-bottom:1rem;'>Ranking por Sharpe</div>
-                    """ + "".join([
-                        f"""<div style='display:flex;justify-content:space-between;align-items:center;
-                            padding:0.5rem 0;border-bottom:1px solid {PALETTE["border"]}44;'>
-                            <span style='font-size:0.8rem;color:{PALETTE["text"]};'>{idx}</span>
-                            <span style='font-family:JetBrains Mono,monospace;font-size:0.8rem;
-                                color:{PALETTE["accent"] if row["Sharpe"] > 0 else PALETTE["negative"]};'>
-                                {row["Sharpe"]:.2f}
-                            </span></div>"""
-                        for idx, row in df_resumo.sort_values("Sharpe", ascending=False).iterrows()
-                    ]) + "</div>", unsafe_allow_html=True)
+                rf_anual = taxa_livre_risco / 100
+                metricas = calcular_metricas(retornos_diarios, rf_anual)
 
-            # ── TAB 3: Drawdown ──
-            with tabs[2]:
-                drawdown = metricas["acumulado"] / metricas["acumulado"].cummax() - 1
-                fig3 = go.Figure()
-                for i, col in enumerate(drawdown.columns):
-                    cor = COLORS_SEQ[i % len(COLORS_SEQ)]
-                    fig3.add_trace(go.Scatter(
-                        x=drawdown.index, y=drawdown[col] * 100,
-                        name=col, fill="tozeroy",
-                        line=dict(color=cor, width=1.5),
-                        fillcolor=f"rgba({int(cor[1:3],16)},{int(cor[3:5],16)},{int(cor[5:7],16)},0.13)" if cor.startswith("#") and len(cor)==7 else cor,
-                        hovertemplate="%{x|%d/%m/%Y}<br><b>%{y:.2f}%</b><extra>" + col + "</extra>",
-                    ))
-                fig3.update_layout(**PLOTLY_LAYOUT, title="Drawdown (%)", height=430,
-                                   yaxis_ticksuffix="%")
-                st.plotly_chart(fig3, use_container_width=True)
-
-            # ── TAB 4: Correlação ──
-            with tabs[3]:
-                corr = retornos_diarios.corr()
-                fig4 = px.imshow(
-                    corr, text_auto=".2f",
-                    color_continuous_scale=["#F87171", PALETTE["panel"], "#22D3EE"],
-                    zmin=-1, zmax=1, aspect="auto",
-                )
-                fig4.update_layout(**PLOTLY_LAYOUT, title="Matriz de Correlação (Retornos Diários)", height=420,
-                                   coloraxis_colorbar=dict(title="ρ", tickfont=dict(color=PALETTE["muted"])))
-                fig4.update_traces(textfont=dict(color="white", size=10))
-                st.plotly_chart(fig4, use_container_width=True)
-                st.caption("Correlação de Pearson entre os retornos diários dos ativos.")
-
-            # ── TAB 5: Distribuições ──
-            with tabs[4]:
-                ret_long = retornos_diarios.copy()
-                ret_long.index.name = "Data"
-                ret_long = ret_long.reset_index().melt(id_vars="Data", var_name="Ativo", value_name="Retorno")
-
-                col_h, col_b2 = st.columns(2)
-                with col_h:
-                    fig5 = px.histogram(
-                        ret_long, x="Retorno", color="Ativo",
-                        nbins=80, opacity=0.7, barmode="overlay",
-                        title="Histograma de Retornos Diários",
-                        color_discrete_sequence=COLORS_SEQ,
-                    )
-                    fig5.update_layout(**PLOTLY_LAYOUT, height=380, xaxis_tickformat=".1%")
-                    st.plotly_chart(fig5, use_container_width=True)
-                with col_b2:
-                    fig6 = px.box(
-                        ret_long, x="Ativo", y="Retorno",
-                        points="suspectedoutliers", color="Ativo",
-                        title="Box Plot — Retornos Diários",
-                        color_discrete_sequence=COLORS_SEQ,
-                    )
-                    fig6.update_layout(**PLOTLY_LAYOUT, height=380, yaxis_tickformat=".1%",
-                                       showlegend=False, xaxis_tickangle=-30)
-                    st.plotly_chart(fig6, use_container_width=True)
-
-            # ── TAB 6: Estatísticas Avançadas ──
-            with tabs[5]:
-                st.markdown(f"<div style='color:{PALETTE['muted']};font-size:0.8rem;margin-bottom:1rem;'>Indicadores de risco avançados e estatísticas de distribuição dos retornos.</div>", unsafe_allow_html=True)
-                col_v1, col_v2 = st.columns(2)
-                with col_v1:
-                    fig_var = go.Figure()
-                    fig_var.add_trace(go.Bar(
-                        x=df_resumo.index, y=df_resumo["VaR 95% (diário %)"],
-                        name="VaR 95%", marker_color=PALETTE["negative"], opacity=0.8,
-                    ))
-                    fig_var.add_trace(go.Bar(
-                        x=df_resumo.index, y=df_resumo["CVaR 95% (diário %)"],
-                        name="CVaR 95%", marker_color="#7C3AED", opacity=0.8,
-                    ))
-                    fig_var.update_layout(**PLOTLY_LAYOUT, title="VaR e CVaR (95%, diário)", height=320,
-                                          barmode="group", yaxis_ticksuffix="%")
-                    st.plotly_chart(fig_var, use_container_width=True)
-                with col_v2:
-                    fig_sk = go.Figure()
-                    fig_sk.add_trace(go.Bar(
-                        x=df_resumo.index, y=df_resumo["Assimetria"],
-                        marker_color=[PALETTE["positive"] if v >= 0 else PALETTE["negative"]
-                                      for v in df_resumo["Assimetria"]],
-                        name="Assimetria",
-                    ))
-                    fig_sk.update_layout(**PLOTLY_LAYOUT, title="Assimetria (Skewness)", height=320)
-                    st.plotly_chart(fig_sk, use_container_width=True)
-
-                # Monthly returns heatmap for best asset
-                melhor = melhor_retorno
-                ret_mensal = retornos_diarios[melhor].resample("ME").apply(lambda x: (1 + x).prod() - 1)
-                ret_mensal_df = pd.DataFrame({
-                    "Ano": ret_mensal.index.year,
-                    "Mês": ret_mensal.index.month,
-                    "Retorno": ret_mensal.values * 100,
+                df_resumo = pd.DataFrame({
+                    "Retorno Total (%)": metricas["retorno_total"] * 100,
+                    "CAGR (%)": metricas["cagr"] * 100,
+                    "Retorno Anual (%)": metricas["retorno_anual"] * 100,
+                    "Volatilidade (%)": metricas["risco_anual"] * 100,
+                    "Sharpe": metricas["sharpe"],
+                    "Sortino": metricas["sortino"],
+                    "Calmar": metricas["calmar"],
+                    "Max Drawdown (%)": metricas["max_drawdown"] * 100,
+                    "VaR 95% (diário %)": metricas["var_95"] * 100,
+                    "CVaR 95% (diário %)": metricas["cvar_95"] * 100,
+                    "Assimetria": metricas["skew"],
+                    "Curtose": metricas["kurt"],
                 })
-                pivot = ret_mensal_df.pivot(index="Ano", columns="Mês", values="Retorno")
-                pivot.columns = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"]
-                fig_heat = px.imshow(
-                    pivot, text_auto=".1f",
-                    color_continuous_scale=["#F87171", PALETTE["panel"], "#34D399"],
-                    zmin=-20, zmax=20, aspect="auto",
-                    title=f"Retorno Mensal (%) — {melhor}",
-                )
-                fig_heat.update_layout(**PLOTLY_LAYOUT, height=280,
-                                        coloraxis_colorbar=dict(title="%", tickfont=dict(color=PALETTE["muted"])))
-                fig_heat.update_traces(textfont=dict(color="white", size=9))
-                st.plotly_chart(fig_heat, use_container_width=True)
 
-            # ── TAB 7: Relatório ──
-            with tabs[6]:
-                fmt = {c: "{:.2f}" for c in df_resumo.columns}
-                st.dataframe(
-                    df_resumo.style
-                    .format(fmt)
-                    .background_gradient(subset=["Sharpe"], cmap="YlGn")
-                    .background_gradient(subset=["Max Drawdown (%)"], cmap="RdYlGn_r"),
-                    use_container_width=True,
-                )
-                csv = (
-                    df_resumo.reset_index()
-                    .rename(columns={"index": "Ativo"})
-                    .to_csv(index=False)
-                    .encode("utf-8")
-                )
-                st.download_button("⬇ Exportar CSV", data=csv, file_name="finrisk_relatorio.csv", mime="text/csv")
+                if retornos_benchmark is not None and retornos_benchmark.var() != 0:
+                    beta = retornos_diarios.apply(
+                        lambda s: s.cov(retornos_benchmark) / retornos_benchmark.var()
+                    )
+                    alpha_jensen = (
+                        metricas["retorno_anual"]
+                        - rf_anual
+                        - beta * (retornos_benchmark.mean() * 252 - rf_anual)
+                    )
+                    df_resumo["Beta"] = beta
+                    df_resumo["Alpha de Jensen (%)"] = alpha_jensen * 100
 
-            with st.expander("🎓 Fundamentos Teóricos"):
+                melhor_retorno = df_resumo["Retorno Anual (%)"].idxmax()
+                melhor_sharpe = df_resumo["Sharpe"].idxmax()
+                menor_drawdown = df_resumo["Max Drawdown (%)"].idxmax()
+                menor_volatilidade = df_resumo["Volatilidade (%)"].idxmin()
+
                 st.markdown(f"""
-                <div style='font-size:0.85rem;line-height:1.8;color:{PALETTE["muted"]};'>
-
-                | Métrica | Definição |
-                |---|---|
-                | **Retorno Total / CAGR** | Crescimento acumulado e taxa de crescimento anual composta |
-                | **Volatilidade** | Desvio padrão dos retornos diários × √252 |
-                | **Índice de Sharpe** | (Retorno – Rf) / Volatilidade total |
-                | **Índice de Sortino** | (Retorno – Rf) / Volatilidade negativa |
-                | **Índice de Calmar** | CAGR / |Max Drawdown| |
-                | **Max Drawdown** | Maior queda do pico ao vale no período |
-                | **VaR 95%** | Perda máxima esperada em 95% dos dias |
-                | **CVaR 95%** | Perda média esperada nos piores 5% dos dias |
-                | **Beta** | Sensibilidade do ativo em relação ao benchmark |
-                | **Alpha de Jensen** | Retorno em excesso ajustado ao risco sistemático |
-                | **Assimetria / Curtose** | Forma da distribuição dos retornos |
-
+                <div style='background:{PALETTE["panel"]};border:1px solid {PALETTE["border"]};
+                    border-radius:14px;padding:1rem 1.5rem;margin-bottom:1.5rem;
+                    display:flex;gap:2rem;flex-wrap:wrap;align-items:center;'>
+                    <div>
+                        <div style='font-size:0.68rem;color:{PALETTE["muted"]};text-transform:uppercase;letter-spacing:0.1em;'>Período</div>
+                        <div style='font-family:JetBrains Mono,monospace;font-size:0.9rem;color:{PALETTE["text"]};'>
+                            {data_inicio.strftime("%d/%m/%Y")} → {data_fim.strftime("%d/%m/%Y")}
+                        </div>
+                    </div>
+                    <div>
+                        <div style='font-size:0.68rem;color:{PALETTE["muted"]};text-transform:uppercase;letter-spacing:0.1em;'>Dias úteis</div>
+                        <div style='font-family:JetBrains Mono,monospace;font-size:0.9rem;color:{PALETTE["text"]};'>
+                            {len(retornos_diarios)}
+                        </div>
+                    </div>
+                    <div>
+                        <div style='font-size:0.68rem;color:{PALETTE["muted"]};text-transform:uppercase;letter-spacing:0.1em;'>Séries</div>
+                        <div style='font-family:JetBrains Mono,monospace;font-size:0.9rem;color:{PALETTE["text"]};'>
+                            {retornos_diarios.shape[1]}
+                        </div>
+                    </div>
+                    <div>
+                        <div style='font-size:0.68rem;color:{PALETTE["muted"]};text-transform:uppercase;letter-spacing:0.1em;'>Taxa livre de risco</div>
+                        <div style='font-family:JetBrains Mono,monospace;font-size:0.9rem;color:{PALETTE["accent2"]};'>
+                            {taxa_livre_risco:.2f}% a.a.
+                        </div>
+                    </div>
+                    <div>
+                        <div style='font-size:0.68rem;color:{PALETTE["muted"]};text-transform:uppercase;letter-spacing:0.1em;'>Benchmark</div>
+                        <div style='font-family:JetBrains Mono,monospace;font-size:0.9rem;color:{PALETTE["accent3"]};'>
+                            {benchmark_label}
+                        </div>
+                    </div>
                 </div>
                 """, unsafe_allow_html=True)
 
-        except Exception as e:
-            st.error(f"Erro no processamento: {e}")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("🏆 Maior Retorno Anual", melhor_retorno,
+                          f"{df_resumo.loc[melhor_retorno, 'Retorno Anual (%)']:.2f}%")
+                c2.metric("⚡ Maior Sharpe", melhor_sharpe,
+                          f"{df_resumo.loc[melhor_sharpe, 'Sharpe']:.2f}")
+                c3.metric("🛡 Menor Drawdown", menor_drawdown,
+                          f"{df_resumo.loc[menor_drawdown, 'Max Drawdown (%)']:.2f}%")
+                c4.metric("🎯 Menor Volatilidade", menor_volatilidade,
+                          f"{df_resumo.loc[menor_volatilidade, 'Volatilidade (%)']:.2f}%")
 
-elif executar and not tickers_selecionados:
-    st.warning("Selecione ao menos um ativo na barra lateral.")
+                st.markdown("")
+
+                tabs = st.tabs([
+                    "📈 Retorno Acumulado",
+                    "🎯 Risco × Retorno",
+                    "📉 Drawdown",
+                    "🔗 Correlação",
+                    "📊 Distribuições",
+                    "🧮 Estatísticas",
+                    "📋 Relatório",
+                ])
+
+                with tabs[0]:
+                    base100 = metricas["acumulado"] * 100
+                    fig = go.Figure()
+                    for i, col in enumerate(base100.columns):
+                        cor = COLORS_SEQ[i % len(COLORS_SEQ)]
+                        fig.add_trace(go.Scatter(
+                            x=base100.index, y=base100[col],
+                            name=col, line=dict(color=cor, width=2),
+                            hovertemplate="%{x|%d/%m/%Y}<br><b>%{y:.1f}</b><extra>" + col + "</extra>",
+                        ))
+                    fig.add_hline(y=100, line_dash="dot", line_color=PALETTE["muted"], opacity=0.5)
+                    fig.update_layout(**PLOTLY_LAYOUT, title="Retorno Acumulado (Base 100)", height=430)
+                    st.plotly_chart(fig, use_container_width=True)
+                    st.caption("Base 100 no início do período. Retornos calculados com preços ajustados.")
+
+                with tabs[1]:
+                    col_a, col_b = st.columns([2, 1])
+                    with col_a:
+                        fig2 = px.scatter(
+                            df_resumo.reset_index().rename(columns={"index": "Ativo"}),
+                            x="Volatilidade (%)", y="Retorno Anual (%)",
+                            text="Ativo", size=df_resumo["Sharpe"].clip(lower=0.01).values,
+                            color="Sharpe", color_continuous_scale=["#F87171", "#F59E0B", "#34D399"],
+                            title="Risco × Retorno (tamanho = Sharpe)",
+                            hover_data=["Sharpe", "Max Drawdown (%)"],
+                        )
+                        fig2.update_traces(textposition="top center", marker=dict(opacity=0.85, line=dict(width=1, color="#000")))
+                        fig2.update_layout(**PLOTLY_LAYOUT, height=430,
+                                           coloraxis_colorbar=dict(title="Sharpe", tickfont=dict(color=PALETTE["muted"])))
+                        st.plotly_chart(fig2, use_container_width=True)
+                    with col_b:
+                        st.markdown(f"""
+                        <div style='background:{PALETTE["panel2"]};border:1px solid {PALETTE["border"]};
+                            border-radius:12px;padding:1.2rem;height:430px;overflow-y:auto;'>
+                            <div style='font-size:0.7rem;text-transform:uppercase;letter-spacing:0.1em;
+                                color:{PALETTE["muted"]};margin-bottom:1rem;'>Ranking por Sharpe</div>
+                        """ + "".join([
+                            f"""<div style='display:flex;justify-content:space-between;align-items:center;
+                                padding:0.5rem 0;border-bottom:1px solid {PALETTE["border"]}44;'>
+                                <span style='font-size:0.8rem;color:{PALETTE["text"]};'>{idx}</span>
+                                <span style='font-family:JetBrains Mono,monospace;font-size:0.8rem;
+                                    color:{PALETTE["accent"] if row["Sharpe"] > 0 else PALETTE["negative"]};'>
+                                    {row["Sharpe"]:.2f}
+                                </span></div>"""
+                            for idx, row in df_resumo.sort_values("Sharpe", ascending=False).iterrows()
+                        ]) + "</div>", unsafe_allow_html=True)
+
+                with tabs[2]:
+                    drawdown = metricas["acumulado"] / metricas["acumulado"].cummax() - 1
+                    fig3 = go.Figure()
+                    for i, col in enumerate(drawdown.columns):
+                        cor = COLORS_SEQ[i % len(COLORS_SEQ)]
+                        fig3.add_trace(go.Scatter(
+                            x=drawdown.index, y=drawdown[col] * 100,
+                            name=col, fill="tozeroy",
+                            line=dict(color=cor, width=1.5),
+                            fillcolor=f"rgba({int(cor[1:3],16)},{int(cor[3:5],16)},{int(cor[5:7],16)},0.13)" if cor.startswith("#") and len(cor)==7 else cor,
+                            hovertemplate="%{x|%d/%m/%Y}<br><b>%{y:.2f}%</b><extra>" + col + "</extra>",
+                        ))
+                    fig3.update_layout(**PLOTLY_LAYOUT, title="Drawdown (%)", height=430,
+                                       yaxis_ticksuffix="%")
+                    st.plotly_chart(fig3, use_container_width=True)
+
+                with tabs[3]:
+                    corr = retornos_diarios.corr()
+                    fig4 = px.imshow(
+                        corr, text_auto=".2f",
+                        color_continuous_scale=["#F87171", PALETTE["panel"], "#22D3EE"],
+                        zmin=-1, zmax=1, aspect="auto",
+                    )
+                    fig4.update_layout(**PLOTLY_LAYOUT, title="Matriz de Correlação (Retornos Diários)", height=420,
+                                       coloraxis_colorbar=dict(title="ρ", tickfont=dict(color=PALETTE["muted"])))
+                    fig4.update_traces(textfont=dict(color="white", size=10))
+                    st.plotly_chart(fig4, use_container_width=True)
+                    st.caption("Correlação de Pearson entre os retornos diários dos ativos.")
+
+                with tabs[4]:
+                    ret_long = retornos_diarios.copy()
+                    ret_long.index.name = "Data"
+                    ret_long = ret_long.reset_index().melt(id_vars="Data", var_name="Ativo", value_name="Retorno")
+
+                    col_h, col_b2 = st.columns(2)
+                    with col_h:
+                        fig5 = px.histogram(
+                            ret_long, x="Retorno", color="Ativo",
+                            nbins=80, opacity=0.7, barmode="overlay",
+                            title="Histograma de Retornos Diários",
+                            color_discrete_sequence=COLORS_SEQ,
+                        )
+                        fig5.update_layout(**PLOTLY_LAYOUT, height=380, xaxis_tickformat=".1%")
+                        st.plotly_chart(fig5, use_container_width=True)
+                    with col_b2:
+                        fig6 = px.box(
+                            ret_long, x="Ativo", y="Retorno",
+                            points="suspectedoutliers", color="Ativo",
+                            title="Box Plot — Retornos Diários",
+                            color_discrete_sequence=COLORS_SEQ,
+                        )
+                        fig6.update_layout(**PLOTLY_LAYOUT, height=380, yaxis_tickformat=".1%",
+                                           showlegend=False, xaxis_tickangle=-30)
+                        st.plotly_chart(fig6, use_container_width=True)
+
+                with tabs[5]:
+                    st.markdown(f"<div style='color:{PALETTE['muted']};font-size:0.8rem;margin-bottom:1rem;'>Indicadores de risco avançados e estatísticas de distribuição dos retornos.</div>", unsafe_allow_html=True)
+                    col_v1, col_v2 = st.columns(2)
+                    with col_v1:
+                        fig_var = go.Figure()
+                        fig_var.add_trace(go.Bar(
+                            x=df_resumo.index, y=df_resumo["VaR 95% (diário %)"],
+                            name="VaR 95%", marker_color=PALETTE["negative"], opacity=0.8,
+                        ))
+                        fig_var.add_trace(go.Bar(
+                            x=df_resumo.index, y=df_resumo["CVaR 95% (diário %)"],
+                            name="CVaR 95%", marker_color="#7C3AED", opacity=0.8,
+                        ))
+                        fig_var.update_layout(**PLOTLY_LAYOUT, title="VaR e CVaR (95%, diário)", height=320,
+                                              barmode="group", yaxis_ticksuffix="%")
+                        st.plotly_chart(fig_var, use_container_width=True)
+                    with col_v2:
+                        fig_sk = go.Figure()
+                        fig_sk.add_trace(go.Bar(
+                            x=df_resumo.index, y=df_resumo["Assimetria"],
+                            marker_color=[PALETTE["positive"] if v >= 0 else PALETTE["negative"]
+                                          for v in df_resumo["Assimetria"]],
+                            name="Assimetria",
+                        ))
+                        fig_sk.update_layout(**PLOTLY_LAYOUT, title="Assimetria (Skewness)", height=320)
+                        st.plotly_chart(fig_sk, use_container_width=True)
+
+                    melhor = melhor_retorno
+                    ret_mensal = retornos_diarios[melhor].resample("ME").apply(lambda x: (1 + x).prod() - 1)
+                    ret_mensal_df = pd.DataFrame({
+                        "Ano": ret_mensal.index.year,
+                        "Mês": ret_mensal.index.month,
+                        "Retorno": ret_mensal.values * 100,
+                    })
+                    pivot = ret_mensal_df.pivot(index="Ano", columns="Mês", values="Retorno")
+                    pivot.columns = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
+                    fig_heat = px.imshow(
+                        pivot, text_auto=".1f",
+                        color_continuous_scale=["#F87171", PALETTE["panel"], "#34D399"],
+                        zmin=-20, zmax=20, aspect="auto",
+                        title=f"Retorno Mensal (%) — {melhor}",
+                    )
+                    fig_heat.update_layout(**PLOTLY_LAYOUT, height=280,
+                                            coloraxis_colorbar=dict(title="%", tickfont=dict(color=PALETTE["muted"])))
+                    fig_heat.update_traces(textfont=dict(color="white", size=9))
+                    st.plotly_chart(fig_heat, use_container_width=True)
+
+                with tabs[6]:
+                    fmt = {c: "{:.2f}" for c in df_resumo.columns}
+                    st.dataframe(
+                        df_resumo.style
+                        .format(fmt)
+                        .background_gradient(subset=["Sharpe"], cmap="YlGn")
+                        .background_gradient(subset=["Max Drawdown (%)"], cmap="RdYlGn_r"),
+                        use_container_width=True,
+                    )
+                    csv = (
+                        df_resumo.reset_index()
+                        .rename(columns={"index": "Ativo"})
+                        .to_csv(index=False)
+                        .encode("utf-8")
+                    )
+                    st.download_button("⬇ Exportar CSV", data=csv, file_name="finrisk_relatorio.csv", mime="text/csv")
+
+                with st.expander("🎓 Fundamentos Teóricos"):
+                    st.markdown(f"""
+                    <div style='font-size:0.85rem;line-height:1.8;color:{PALETTE["muted"]};'>
+
+                    | Métrica | Definição |
+                    |---|---|
+                    | **Retorno Total / CAGR** | Crescimento acumulado e taxa de crescimento anual composta |
+                    | **Volatilidade** | Desvio padrão dos retornos diários × √252 |
+                    | **Índice de Sharpe** | (Retorno – Rf) / Volatilidade total |
+                    | **Índice de Sortino** | (Retorno – Rf) / Volatilidade negativa |
+                    | **Índice de Calmar** | CAGR / |Max Drawdown| |
+                    | **Max Drawdown** | Maior queda do pico ao vale no período |
+                    | **VaR 95%** | Perda máxima esperada em 95% dos dias |
+                    | **CVaR 95%** | Perda média esperada nos piores 5% dos dias |
+                    | **Beta** | Sensibilidade do ativo em relação ao benchmark |
+                    | **Alpha de Jensen** | Retorno em excesso ajustado ao risco sistemático |
+                    | **Assimetria / Curtose** | Forma da distribuição dos retornos |
+
+                    </div>
+                    """, unsafe_allow_html=True)
+
+            except Exception as e:
+                st.error(f"Erro no processamento: {e}")
+
+    elif executar and not tickers_selecionados:
+        st.warning("Selecione ao menos um ativo na barra lateral.")
+
+    else:
+        st.markdown(f"""
+        <div style='display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin-bottom:2rem;'>
+            <div style='background:{PALETTE["panel"]};border:1px solid {PALETTE["border"]};border-radius:14px;padding:1.4rem;'>
+                <div style='font-size:1.5rem;margin-bottom:0.5rem;'>📈</div>
+                <div style='font-weight:600;color:{PALETTE["text"]};margin-bottom:0.3rem;'>Retorno & Risco</div>
+                <div style='font-size:0.8rem;color:{PALETTE["muted"]};'>Sharpe, Sortino, Calmar, VaR, CVaR e muito mais</div>
+            </div>
+            <div style='background:{PALETTE["panel"]};border:1px solid {PALETTE["border"]};border-radius:14px;padding:1.4rem;'>
+                <div style='font-size:1.5rem;margin-bottom:0.5rem;'>🌎</div>
+                <div style='font-weight:600;color:{PALETTE["text"]};margin-bottom:0.3rem;'>Ativos Globais</div>
+                <div style='font-size:0.8rem;color:{PALETTE["muted"]};'>Ações B3, ETFs, BDRs, ações americanas e criptomoedas</div>
+            </div>
+            <div style='background:{PALETTE["panel"]};border:1px solid {PALETTE["border"]};border-radius:14px;padding:1.4rem;'>
+                <div style='font-size:1.5rem;margin-bottom:0.5rem;'>🧮</div>
+                <div style='font-weight:600;color:{PALETTE["text"]};margin-bottom:0.3rem;'>Análise Avançada</div>
+                <div style='font-size:0.8rem;color:{PALETTE["muted"]};'>Alpha de Jensen, heatmap mensal, matriz de correlação</div>
+            </div>
+        </div>
+        <div style='background:{PALETTE["panel"]};border:1px solid {PALETTE["border"]};border-radius:14px;padding:1.5rem;'>
+            <div style='font-size:0.75rem;text-transform:uppercase;letter-spacing:0.1em;color:{PALETTE["muted"]};margin-bottom:1rem;'>Como usar</div>
+            <div style='display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;'>
+                <div style='text-align:center;'>
+                    <div style='font-family:JetBrains Mono,monospace;font-size:1.2rem;color:{PALETTE["accent"]};font-weight:700;'>01</div>
+                    <div style='font-size:0.8rem;color:{PALETTE["muted"]};margin-top:0.3rem;'>Selecione os ativos na barra lateral</div>
+                </div>
+                <div style='text-align:center;'>
+                    <div style='font-family:JetBrains Mono,monospace;font-size:1.2rem;color:{PALETTE["accent"]};font-weight:700;'>02</div>
+                    <div style='font-size:0.8rem;color:{PALETTE["muted"]};margin-top:0.3rem;'>Defina o período e os parâmetros</div>
+                </div>
+                <div style='text-align:center;'>
+                    <div style='font-family:JetBrains Mono,monospace;font-size:1.2rem;color:{PALETTE["accent"]};font-weight:700;'>03</div>
+                    <div style='font-size:0.8rem;color:{PALETTE["muted"]};margin-top:0.3rem;'>Clique em "Gerar Análise"</div>
+                </div>
+                <div style='text-align:center;'>
+                    <div style='font-family:JetBrains Mono,monospace;font-size:1.2rem;color:{PALETTE["accent"]};font-weight:700;'>04</div>
+                    <div style='font-size:0.8rem;color:{PALETTE["muted"]};margin-top:0.3rem;'>Explore os gráficos e exporte o relatório</div>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
 else:
-    # Landing state
-    st.markdown(f"""
-    <div style='display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin-bottom:2rem;'>
-        <div style='background:{PALETTE["panel"]};border:1px solid {PALETTE["border"]};border-radius:14px;padding:1.4rem;'>
-            <div style='font-size:1.5rem;margin-bottom:0.5rem;'>📈</div>
-            <div style='font-weight:600;color:{PALETTE["text"]};margin-bottom:0.3rem;'>Retorno & Risco</div>
-            <div style='font-size:0.8rem;color:{PALETTE["muted"]};'>Sharpe, Sortino, Calmar, VaR, CVaR e muito mais</div>
-        </div>
-        <div style='background:{PALETTE["panel"]};border:1px solid {PALETTE["border"]};border-radius:14px;padding:1.4rem;'>
-            <div style='font-size:1.5rem;margin-bottom:0.5rem;'>🌎</div>
-            <div style='font-weight:600;color:{PALETTE["text"]};margin-bottom:0.3rem;'>Ativos Globais</div>
-            <div style='font-size:0.8rem;color:{PALETTE["muted"]};'>Ações B3, ETFs, BDRs, ações americanas e criptomoedas</div>
-        </div>
-        <div style='background:{PALETTE["panel"]};border:1px solid {PALETTE["border"]};border-radius:14px;padding:1.4rem;'>
-            <div style='font-size:1.5rem;margin-bottom:0.5rem;'>🧮</div>
-            <div style='font-weight:600;color:{PALETTE["text"]};margin-bottom:0.3rem;'>Análise Avançada</div>
-            <div style='font-size:0.8rem;color:{PALETTE["muted"]};'>Alpha de Jensen, heatmap mensal, matriz de correlação</div>
-        </div>
-    </div>
-    <div style='background:{PALETTE["panel"]};border:1px solid {PALETTE["border"]};border-radius:14px;padding:1.5rem;'>
-        <div style='font-size:0.75rem;text-transform:uppercase;letter-spacing:0.1em;color:{PALETTE["muted"]};margin-bottom:1rem;'>Como usar</div>
-        <div style='display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;'>
-            <div style='text-align:center;'>
-                <div style='font-family:JetBrains Mono,monospace;font-size:1.2rem;color:{PALETTE["accent"]};font-weight:700;'>01</div>
-                <div style='font-size:0.8rem;color:{PALETTE["muted"]};margin-top:0.3rem;'>Selecione os ativos na barra lateral</div>
-            </div>
-            <div style='text-align:center;'>
-                <div style='font-family:JetBrains Mono,monospace;font-size:1.2rem;color:{PALETTE["accent"]};font-weight:700;'>02</div>
-                <div style='font-size:0.8rem;color:{PALETTE["muted"]};margin-top:0.3rem;'>Defina o período e os parâmetros</div>
-            </div>
-            <div style='text-align:center;'>
-                <div style='font-family:JetBrains Mono,monospace;font-size:1.2rem;color:{PALETTE["accent"]};font-weight:700;'>03</div>
-                <div style='font-size:0.8rem;color:{PALETTE["muted"]};margin-top:0.3rem;'>Clique em "Gerar Análise"</div>
-            </div>
-            <div style='text-align:center;'>
-                <div style='font-family:JetBrains Mono,monospace;font-size:1.2rem;color:{PALETTE["accent"]};font-weight:700;'>04</div>
-                <div style='font-size:0.8rem;color:{PALETTE["muted"]};margin-top:0.3rem;'>Explore os gráficos e exporte o relatório</div>
-            </div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    if executar:
+        tabela_projeto = montar_tabela_projeto(investimento_inicial, fluxos_caixa_projeto, taxa_desconto)
+        vpl = calcular_vpl(investimento_inicial, fluxos_caixa_projeto, taxa_desconto)
+        tir = calcular_tir(investimento_inicial, fluxos_caixa_projeto)
+        payback_simples = calcular_payback_simples(investimento_inicial, fluxos_caixa_projeto)
+        payback_descontado = calcular_payback_descontado(investimento_inicial, fluxos_caixa_projeto, taxa_desconto)
 
-# Footer
+        taxas_sensibilidade = np.arange(0, 31, 2)
+        df_sensibilidade = pd.DataFrame({
+            "Taxa (%)": taxas_sensibilidade,
+            "VPL (R$)": [calcular_vpl(investimento_inicial, fluxos_caixa_projeto, taxa) for taxa in taxas_sensibilidade],
+        })
+
+        st.markdown(f"""
+        <div style='background:{PALETTE["panel"]};border:1px solid {PALETTE["border"]};
+            border-radius:14px;padding:1rem 1.5rem;margin-bottom:1.5rem;
+            display:flex;gap:2rem;flex-wrap:wrap;align-items:center;'>
+            <div>
+                <div style='font-size:0.68rem;color:{PALETTE["muted"]};text-transform:uppercase;letter-spacing:0.1em;'>Projeto</div>
+                <div style='font-family:JetBrains Mono,monospace;font-size:0.9rem;color:{PALETTE["text"]};'>
+                    {nome_projeto}
+                </div>
+            </div>
+            <div>
+                <div style='font-size:0.68rem;color:{PALETTE["muted"]};text-transform:uppercase;letter-spacing:0.1em;'>Investimento Inicial</div>
+                <div style='font-family:JetBrains Mono,monospace;font-size:0.9rem;color:{PALETTE["accent2"]};'>
+                    R$ {investimento_inicial:,.2f}
+                </div>
+            </div>
+            <div>
+                <div style='font-size:0.68rem;color:{PALETTE["muted"]};text-transform:uppercase;letter-spacing:0.1em;'>TMA</div>
+                <div style='font-family:JetBrains Mono,monospace;font-size:0.9rem;color:{PALETTE["accent3"]};'>
+                    {taxa_desconto:.2f}% a.a.
+                </div>
+            </div>
+            <div>
+                <div style='font-size:0.68rem;color:{PALETTE["muted"]};text-transform:uppercase;letter-spacing:0.1em;'>Horizonte</div>
+                <div style='font-family:JetBrains Mono,monospace;font-size:0.9rem;color:{PALETTE["text"]};'>
+                    {quantidade_periodos} anos
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("💵 VPL", f"R$ {vpl:,.2f}")
+        c2.metric("📈 TIR", "N/D" if pd.isna(tir) else f"{tir * 100:.2f}%")
+        c3.metric("⏱ Payback Simples", "N/D" if pd.isna(payback_simples) else f"{payback_simples:.2f} anos")
+        c4.metric("🧮 Payback Descontado", "N/D" if pd.isna(payback_descontado) else f"{payback_descontado:.2f} anos")
+
+        tabs = st.tabs(["💸 Fluxo de Caixa", "📊 Sensibilidade", "📋 Relatório"])
+
+        with tabs[0]:
+            col_g1, col_g2 = st.columns(2)
+            with col_g1:
+                fig_fluxo = go.Figure()
+                fig_fluxo.add_trace(go.Bar(
+                    x=tabela_projeto["Período"],
+                    y=tabela_projeto["Fluxo de Caixa (R$)"],
+                    marker_color=[PALETTE["negative"]] + [PALETTE["positive"]] * (len(tabela_projeto) - 1),
+                    name="Fluxo de Caixa",
+                ))
+                fig_fluxo.update_layout(**PLOTLY_LAYOUT, title="Fluxo de Caixa do Projeto", height=360)
+                st.plotly_chart(fig_fluxo, use_container_width=True)
+
+            with col_g2:
+                fig_acumulado = go.Figure()
+                fig_acumulado.add_trace(go.Scatter(
+                    x=tabela_projeto["Período"],
+                    y=tabela_projeto["Acumulado Descontado (R$)"],
+                    mode="lines+markers",
+                    line=dict(color=PALETTE["accent"], width=3),
+                    name="Acumulado Descontado",
+                ))
+                fig_acumulado.add_hline(y=0, line_dash="dot", line_color=PALETTE["muted"])
+                fig_acumulado.update_layout(**PLOTLY_LAYOUT, title="Evolução do Fluxo Acumulado Descontado", height=360)
+                st.plotly_chart(fig_acumulado, use_container_width=True)
+
+            st.dataframe(
+                tabela_projeto.style.format({
+                    "Fluxo de Caixa (R$)": "R$ {:,.2f}",
+                    "Fluxo Descontado (R$)": "R$ {:,.2f}",
+                    "Acumulado (R$)": "R$ {:,.2f}",
+                    "Acumulado Descontado (R$)": "R$ {:,.2f}",
+                }),
+                use_container_width=True,
+            )
+
+        with tabs[1]:
+            fig_sensibilidade = px.line(
+                df_sensibilidade,
+                x="Taxa (%)",
+                y="VPL (R$)",
+                markers=True,
+                title="Sensibilidade do VPL em relação à TMA",
+            )
+            fig_sensibilidade.update_traces(line=dict(color=PALETTE["accent3"], width=3))
+            fig_sensibilidade.update_layout(**PLOTLY_LAYOUT, height=360)
+            st.plotly_chart(fig_sensibilidade, use_container_width=True)
+
+            st.caption("Se o VPL permanecer positivo em taxas maiores, o projeto tende a ser mais robusto.")
+
+        with tabs[2]:
+            resumo_projeto = pd.DataFrame({
+                "Indicador": ["Projeto", "Investimento Inicial", "TMA (%)", "VPL (R$)", "TIR (%)", "Payback Simples (anos)", "Payback Descontado (anos)"],
+                "Valor": [
+                    nome_projeto,
+                    investimento_inicial,
+                    taxa_desconto,
+                    vpl,
+                    np.nan if pd.isna(tir) else tir * 100,
+                    payback_simples,
+                    payback_descontado,
+                ],
+            })
+            st.dataframe(resumo_projeto, use_container_width=True)
+
+            csv_projeto = tabela_projeto.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "⬇ Exportar Relatório do Projeto",
+                data=csv_projeto,
+                file_name="projeto_investimento_relatorio.csv",
+                mime="text/csv",
+            )
+
+        with st.expander("🎓 Fundamentos Teóricos"):
+            st.markdown(f"""
+            <div style='font-size:0.85rem;line-height:1.8;color:{PALETTE["muted"]};'>
+
+            | Indicador | Definição |
+            |---|---|
+            | **VPL** | Soma dos fluxos de caixa descontados menos o investimento inicial |
+            | **TIR** | Taxa que zera o VPL do projeto |
+            | **Payback Simples** | Tempo necessário para recuperar o investimento sem descontar a taxa |
+            | **Payback Descontado** | Tempo necessário para recuperar o investimento considerando a TMA |
+            | **Sensibilidade do VPL** | Mostra como o projeto reage a mudanças na taxa de desconto |
+
+            </div>
+            """, unsafe_allow_html=True)
+
+    else:
+        st.markdown(f"""
+        <div style='display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin-bottom:2rem;'>
+            <div style='background:{PALETTE["panel"]};border:1px solid {PALETTE["border"]};border-radius:14px;padding:1.4rem;'>
+                <div style='font-size:1.5rem;margin-bottom:0.5rem;'>💵</div>
+                <div style='font-weight:600;color:{PALETTE["text"]};margin-bottom:0.3rem;'>Análise de Projeto</div>
+                <div style='font-size:0.8rem;color:{PALETTE["muted"]};'>Avalie investimentos com VPL, TIR e payback.</div>
+            </div>
+            <div style='background:{PALETTE["panel"]};border:1px solid {PALETTE["border"]};border-radius:14px;padding:1.4rem;'>
+                <div style='font-size:1.5rem;margin-bottom:0.5rem;'>🧾</div>
+                <div style='font-weight:600;color:{PALETTE["text"]};margin-bottom:0.3rem;'>Captura de Dados</div>
+                <div style='font-size:0.8rem;color:{PALETTE["muted"]};'>Informe investimento inicial, TMA e fluxos de caixa anuais.</div>
+            </div>
+            <div style='background:{PALETTE["panel"]};border:1px solid {PALETTE["border"]};border-radius:14px;padding:1.4rem;'>
+                <div style='font-size:1.5rem;margin-bottom:0.5rem;'>📋</div>
+                <div style='font-weight:600;color:{PALETTE["text"]};margin-bottom:0.3rem;'>Relatório</div>
+                <div style='font-size:0.8rem;color:{PALETTE["muted"]};'>Gere tabela, gráficos e exporte o resultado em CSV.</div>
+            </div>
+        </div>
+        <div style='background:{PALETTE["panel"]};border:1px solid {PALETTE["border"]};border-radius:14px;padding:1.5rem;'>
+            <div style='font-size:0.75rem;text-transform:uppercase;letter-spacing:0.1em;color:{PALETTE["muted"]};margin-bottom:1rem;'>Como usar</div>
+            <div style='display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;'>
+                <div style='text-align:center;'>
+                    <div style='font-family:JetBrains Mono,monospace;font-size:1.2rem;color:{PALETTE["accent"]};font-weight:700;'>01</div>
+                    <div style='font-size:0.8rem;color:{PALETTE["muted"]};margin-top:0.3rem;'>Escolha o módulo Trabalho 2</div>
+                </div>
+                <div style='text-align:center;'>
+                    <div style='font-family:JetBrains Mono,monospace;font-size:1.2rem;color:{PALETTE["accent"]};font-weight:700;'>02</div>
+                    <div style='font-size:0.8rem;color:{PALETTE["muted"]};margin-top:0.3rem;'>Preencha investimento inicial e TMA</div>
+                </div>
+                <div style='text-align:center;'>
+                    <div style='font-family:JetBrains Mono,monospace;font-size:1.2rem;color:{PALETTE["accent"]};font-weight:700;'>03</div>
+                    <div style='font-size:0.8rem;color:{PALETTE["muted"]};margin-top:0.3rem;'>Informe os fluxos anuais do projeto</div>
+                </div>
+                <div style='text-align:center;'>
+                    <div style='font-family:JetBrains Mono,monospace;font-size:1.2rem;color:{PALETTE["accent"]};font-weight:700;'>04</div>
+                    <div style='font-size:0.8rem;color:{PALETTE["muted"]};margin-top:0.3rem;'>Clique em "Gerar Análise" para emitir o relatório</div>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
 st.markdown(f"""
 <div style='margin-top:3rem;border-top:1px solid {PALETTE["border"]};padding-top:1rem;
     display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.5rem;'>
@@ -879,7 +1192,7 @@ st.markdown(f"""
         FinRisk · UFMG · CAD · Administração Financeira · Prof. Bruno Pérez Ferreira
     </span>
     <span style='font-size:0.7rem;color:{PALETTE["muted"]};font-family:JetBrains Mono,monospace;'>
-        Dados: Yahoo Finance · yfinance · scipy · plotly
+        Trabalho 1 + Trabalho 2 · Dados de mercado e análise de projetos
     </span>
 </div>
 """, unsafe_allow_html=True)
